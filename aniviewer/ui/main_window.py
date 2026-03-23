@@ -399,9 +399,10 @@ class MSMAnimationViewer(QMainWindow):
         self.anchor_debug_enabled: bool = bool(self.export_settings.anchor_debug_logging)
         self.constraints_enabled: bool = bool(self.settings.value('constraints/enabled', True, type=bool))
         self.constraints: List[ConstraintSpec] = self._load_constraints_from_settings()
+        self.auto_constraints: List[ConstraintSpec] = []
         self.constraint_manager = ConstraintManager()
         self.constraint_manager.enabled = self.constraints_enabled
-        self.constraint_manager.set_constraints(self.constraints)
+        self._sync_constraint_manager()
         self.constraint_manager.disabled_layer_names = set(
             self._load_constraint_layer_disables()
         )
@@ -8315,6 +8316,58 @@ class MSMAnimationViewer(QMainWindow):
             blob = "[]"
         self.settings.setValue('constraints/disabled_layers', blob)
 
+    def _sync_constraint_manager(self) -> None:
+        """Apply manual and auto-generated constraints to the runtime manager."""
+        self.constraint_manager.set_constraints([*self.constraints, *self.auto_constraints])
+
+    def _rebuild_auto_constraints(self) -> None:
+        """Generate default parent-child distance constraints for the loaded animation."""
+        previous_enabled = {spec.cid: bool(spec.enabled) for spec in self.auto_constraints}
+        self.auto_constraints = []
+        if not hasattr(self, "gl_widget") or not self.gl_widget:
+            self._sync_constraint_manager()
+            return
+        animation = getattr(self.gl_widget.player, "animation", None)
+        if not animation:
+            self._sync_constraint_manager()
+            return
+
+        layer_map = {layer.layer_id: layer for layer in animation.layers}
+        states = self.gl_widget._build_layer_world_states(apply_constraints=False)
+        auto_constraints: List[ConstraintSpec] = []
+        for layer in animation.layers:
+            parent_id = getattr(layer, "parent_id", None)
+            if parent_id is None or parent_id < 0:
+                continue
+            parent = layer_map.get(parent_id)
+            child_state = states.get(layer.layer_id)
+            parent_state = states.get(parent_id)
+            if not parent or not child_state or not parent_state:
+                continue
+            child_x = float(child_state.get("anchor_world_x", child_state.get("tx", 0.0)))
+            child_y = float(child_state.get("anchor_world_y", child_state.get("ty", 0.0)))
+            parent_x = float(parent_state.get("anchor_world_x", parent_state.get("tx", 0.0)))
+            parent_y = float(parent_state.get("anchor_world_y", parent_state.get("ty", 0.0)))
+            cid = f"auto_distance:{layer.layer_id}:{parent_id}"
+            auto_constraints.append(
+                ConstraintSpec(
+                    cid=cid,
+                    ctype="distance",
+                    enabled=previous_enabled.get(cid, True),
+                    layer_id=layer.layer_id,
+                    layer_name=layer.name,
+                    target_layer_id=parent_id,
+                    target_layer_name=parent.name,
+                    label=f"Auto Distance: {layer.name} -> {parent.name}",
+                    params={
+                        "distance": max(0.0, math.hypot(child_x - parent_x, child_y - parent_y)),
+                        "auto_created": True,
+                    },
+                )
+            )
+        self.auto_constraints = auto_constraints
+        self._sync_constraint_manager()
+
     def _load_base_bpm_overrides(self) -> None:
         """Load persisted base BPM overrides per monster token."""
         blob = self.settings.value('audio/base_bpm_overrides', '{}', type=str) or '{}'
@@ -11717,15 +11770,19 @@ class MSMAnimationViewer(QMainWindow):
             variant_layers = self._detect_layers_with_sprite_variants(animation.layers)
             self.layer_panel.set_layers_with_sprite_variants(variant_layers)
             self.layer_panel.set_selection_state(self.selected_layer_ids)
+            self._rebuild_auto_constraints()
             self._refresh_constraints_ui()
             if self.joint_solver_enabled:
                 self.gl_widget.capture_joint_rest_lengths()
             self._refresh_layer_thumbnails()
         else:
+            self.auto_constraints = []
+            self._sync_constraint_manager()
             self.layer_panel.set_default_hidden_layers(set())
             self.layer_panel.update_layers([])
             self.layer_panel.set_layers_with_sprite_variants(set())
             self.layer_panel.set_selection_state(set())
+            self._refresh_constraints_ui()
 
     def _sync_layer_constraint_toggles(self) -> None:
         """Update per-layer constraint toggles from stored disable list."""
@@ -11745,10 +11802,13 @@ class MSMAnimationViewer(QMainWindow):
         animation = getattr(self.gl_widget.player, "animation", None) if hasattr(self, "gl_widget") else None
         if animation:
             layer_map = {layer.layer_id: layer for layer in animation.layers}
-        entries: List[Tuple[str, bool, str]] = []
+        entries: List[Tuple[str, bool, str, bool]] = []
         for spec in self.constraints:
             label = self.constraint_manager.describe(spec, layer_map)
-            entries.append((spec.cid, bool(spec.enabled), label))
+            entries.append((spec.cid, bool(spec.enabled), label, True))
+        for spec in self.auto_constraints:
+            label = self.constraint_manager.describe(spec, layer_map)
+            entries.append((spec.cid, bool(spec.enabled), label, False))
         self.control_panel.update_constraints_list(entries)
         self._sync_layer_constraint_toggles()
 
@@ -16939,8 +16999,9 @@ class MSMAnimationViewer(QMainWindow):
         if not spec:
             return
         spec.enabled = bool(enabled)
-        self._save_constraints_to_settings()
-        self.constraint_manager.set_constraints(self.constraints)
+        if spec in self.constraints:
+            self._save_constraints_to_settings()
+        self._sync_constraint_manager()
         self.gl_widget.update()
 
     def on_constraint_add_requested(self):
@@ -16961,7 +17022,7 @@ class MSMAnimationViewer(QMainWindow):
         if not spec:
             return
         self.constraints.append(spec)
-        self.constraint_manager.set_constraints(self.constraints)
+        self._sync_constraint_manager()
         self._save_constraints_to_settings()
         self._refresh_constraints_ui()
         self.gl_widget.update()
@@ -16986,7 +17047,7 @@ class MSMAnimationViewer(QMainWindow):
             if existing.cid == cid:
                 self.constraints[idx] = updated
                 break
-        self.constraint_manager.set_constraints(self.constraints)
+        self._sync_constraint_manager()
         self._save_constraints_to_settings()
         self._refresh_constraints_ui()
         self.gl_widget.update()
@@ -16996,7 +17057,7 @@ class MSMAnimationViewer(QMainWindow):
         self.constraints = [spec for spec in self.constraints if spec.cid != cid]
         if len(self.constraints) == before:
             return
-        self.constraint_manager.set_constraints(self.constraints)
+        self._sync_constraint_manager()
         self._save_constraints_to_settings()
         self._refresh_constraints_ui()
         self.gl_widget.update()
@@ -17014,7 +17075,7 @@ class MSMAnimationViewer(QMainWindow):
         self.gl_widget.update()
 
     def _find_constraint_by_id(self, cid: str) -> Optional[ConstraintSpec]:
-        for spec in self.constraints:
+        for spec in [*self.constraints, *self.auto_constraints]:
             if spec.cid == cid:
                 return spec
         return None

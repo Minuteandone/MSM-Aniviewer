@@ -2640,13 +2640,13 @@ class ControlPanel(QWidget):
         self.preserve_children_on_record_checkbox.setChecked(bool(enabled))
         self.preserve_children_on_record_checkbox.blockSignals(False)
 
-    def update_constraints_list(self, entries: List[Tuple[str, bool, str]]):
-        """Populate the constraints list (cid, enabled, label)."""
+    def update_constraints_list(self, entries: List[Tuple[str, bool, str, bool]]):
+        """Populate the constraints list (cid, enabled, label, editable)."""
         if not hasattr(self, "constraints_list"):
             return
         self._updating_constraints_list = True
         self.constraints_list.clear()
-        for cid, enabled, label in entries:
+        for cid, enabled, label, editable in entries:
             item = QListWidgetItem(label)
             item.setFlags(
                 item.flags()
@@ -2656,6 +2656,7 @@ class ControlPanel(QWidget):
             )
             item.setCheckState(Qt.CheckState.Checked if enabled else Qt.CheckState.Unchecked)
             item.setData(Qt.ItemDataRole.UserRole, cid)
+            item.setData(Qt.ItemDataRole.UserRole + 1, bool(editable))
             self.constraints_list.addItem(item)
         self._updating_constraints_list = False
         self._update_constraint_buttons()
@@ -2673,15 +2674,18 @@ class ControlPanel(QWidget):
         self._update_constraint_buttons()
 
     def _update_constraint_buttons(self):
-        has_selection = bool(self.constraints_list.currentItem()) if hasattr(self, "constraints_list") else False
+        item = self.constraints_list.currentItem() if hasattr(self, "constraints_list") else None
+        editable = bool(item.data(Qt.ItemDataRole.UserRole + 1)) if item else False
         if hasattr(self, "constraint_edit_btn"):
-            self.constraint_edit_btn.setEnabled(has_selection)
+            self.constraint_edit_btn.setEnabled(editable)
         if hasattr(self, "constraint_remove_btn"):
-            self.constraint_remove_btn.setEnabled(has_selection)
+            self.constraint_remove_btn.setEnabled(editable)
 
     def _emit_constraint_edit(self):
         item = self.constraints_list.currentItem() if hasattr(self, "constraints_list") else None
         if not item:
+            return
+        if not bool(item.data(Qt.ItemDataRole.UserRole + 1)):
             return
         cid = item.data(Qt.ItemDataRole.UserRole)
         if cid:
@@ -2690,6 +2694,8 @@ class ControlPanel(QWidget):
     def _emit_constraint_remove(self):
         item = self.constraints_list.currentItem() if hasattr(self, "constraints_list") else None
         if not item:
+            return
+        if not bool(item.data(Qt.ItemDataRole.UserRole + 1)):
             return
         cid = item.data(Qt.ItemDataRole.UserRole)
         if cid:
